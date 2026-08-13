@@ -1,0 +1,10 @@
+@"
+target/
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+.DS_Store
+"@ | Out-File -Encoding utf8 .gitignore
