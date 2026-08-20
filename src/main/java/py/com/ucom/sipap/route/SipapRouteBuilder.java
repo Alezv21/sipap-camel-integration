@@ -1,98 +1,63 @@
 package py.com.ucom.sipap.route;
 
+import org.apache.camel.Exchange;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.model.dataformat.JsonLibrary;
+import org.apache.camel.model.rest.RestBindingMode;
+import py.com.ucom.sipap.domain.TransferMessage;
+import py.com.ucom.sipap.domain.TransferRequest;
+import py.com.ucom.sipap.exception.DuplicateTransactionException;
 import py.com.ucom.sipap.exception.TlvParseException;
 import py.com.ucom.sipap.exception.TransferValidationException;
-import py.com.ucom.sipap.processor.BankConsumerProcessor;
-import py.com.ucom.sipap.processor.QrParserProcessor;
-import py.com.ucom.sipap.processor.RejectionProcessor;
-import py.com.ucom.sipap.processor.TransferValidationProcessor;
+import py.com.ucom.sipap.processor.*;
 import py.com.ucom.sipap.util.QrTestData;
 
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-
 public class SipapRouteBuilder extends RouteBuilder {
-    private static final AtomicLong SEQUENCE = new AtomicLong(1);
-    private static final AtomicInteger PRODUCER_A_CASE = new AtomicInteger(0);
-    private static final AtomicInteger PRODUCER_B_CASE = new AtomicInteger(0);
+    private final String bankMockBaseUrl = env("BANK_MOCK_BASE_URL", "http://localhost:8089");
 
     @Override
     public void configure() {
+        restConfiguration()
+                .component("undertow")
+                .host("0.0.0.0")
+                .port(8080)
+                .bindingMode(RestBindingMode.off);
+
+        onException(DuplicateTransactionException.class)
+                .handled(true)
+                .process(new ApiRejectionProcessor("DUPLICADA", 409))
+                .marshal().json(JsonLibrary.Jackson);
+
         onException(TlvParseException.class, TransferValidationException.class)
                 .handled(true)
-                .process(new RejectionProcessor())
-                .marshal().json(JsonLibrary.Jackson)
-                .to("direct:resultado");
+                .process(new ApiRejectionProcessor("RECHAZADA", 400))
+                .marshal().json(JsonLibrary.Jackson);
 
-        /*
-         * PRODUCTOR A ejecuta los casos 1, 3, 5 y 7.
-         * PRODUCTOR B ejecuta los casos 2, 4 y 6.
-         * Los delays están intercalados para que la consola muestre los siete
-         * escenarios en el mismo orden de la consigna.
-         */
-        from("timer:bancoA?period=4000&delay=1000&repeatCount=4")
-                .routeId("productor-banco-a")
-                .process(exchange -> {
-                    int execution = PRODUCER_A_CASE.incrementAndGet();
-                    exchange.getMessage().setHeader("transactionId", nextTransactionId());
+        rest("/transferencias")
+                .description("API REST de entrada para transferencias SIP/QR")
+                .post()
+                .consumes("application/json")
+                .produces("application/json")
+                .to("direct:api-transferencias");
 
-                    switch (execution) {
-                        case 1 -> setScenario(exchange, 1, "TRANSFERENCIA VÁLIDA ITAU",
-                                QrTestData.validDynamic(QrTestData.ITAU, "1234567890", "15000"));
-                        case 2 -> setScenario(exchange, 3, "TRANSFERENCIA VÁLIDA FAMILIAR",
-                                QrTestData.validDynamic(QrTestData.FAMILIAR, "9876543210", "25000"));
-                        case 3 -> setScenario(exchange, 5, "LONGITUD TLV INCORRECTA",
-                                QrTestData.invalidDeclaredLength());
-                        case 4 -> setScenario(exchange, 7, "CHECKSUM INVÁLIDO",
-                                QrTestData.invalidChecksum());
-                        default -> throw new IllegalStateException("Caso no configurado para productor A");
-                    }
-                })
-                .log(LoggingLevel.INFO,
-                        "\n====================================================\n" +
-                        "INICIO CASO ${header.scenarioNumber} - ${header.scenarioName}\n" +
-                        "TX: ${header.transactionId}\n" +
-                        "Productor: BANCO A\n" +
-                        "QR: ${body}\n" +
-                        "====================================================")
-                .to("direct:sipap-in");
-
-        from("timer:bancoB?period=4000&delay=3000&repeatCount=3")
-                .routeId("productor-banco-b")
-                .process(exchange -> {
-                    int execution = PRODUCER_B_CASE.incrementAndGet();
-                    exchange.getMessage().setHeader("transactionId", nextTransactionId());
-
-                    switch (execution) {
-                        case 1 -> setScenario(exchange, 2, "TRANSFERENCIA VÁLIDA ATLAS",
-                                QrTestData.validDynamic(QrTestData.ATLAS, "2222222222", "20000"));
-                        case 2 -> setScenario(exchange, 4, "BANCO DESTINO DESCONOCIDO",
-                                QrTestData.unknownBank());
-                        case 3 -> setScenario(exchange, 6, "MONTO MAYOR O IGUAL A 10.000.000",
-                                QrTestData.amountAtLimit());
-                        default -> throw new IllegalStateException("Caso no configurado para productor B");
-                    }
-                })
-                .log(LoggingLevel.INFO,
-                        "\n====================================================\n" +
-                        "INICIO CASO ${header.scenarioNumber} - ${header.scenarioName}\n" +
-                        "TX: ${header.transactionId}\n" +
-                        "Productor: BANCO B\n" +
-                        "QR: ${body}\n" +
-                        "====================================================")
-                .to("direct:sipap-in");
-
-        // Message Channel + Wire Tap + Pipes and Filters
-        from("direct:sipap-in")
-                .routeId("sipap-mediator")
-                .wireTap("direct:audit")
+        // Conector REST de entrada + pipeline heredado de Tarea 1.
+        from("direct:api-transferencias")
+                .routeId("api-transferencias")
+                .unmarshal().json(JsonLibrary.Jackson, TransferRequest.class)
+                .process(new RequestMetadataProcessor())
+                .wireTap("direct:audit-input")
                 .to("direct:parse")
+                .process(new StaticAmountEnrichmentProcessor())
                 .to("direct:validate")
+                .process(new AmountLimitProcessor())
+                .process(new IdempotencyProcessor())
+                .process(new TransferMessageProcessor())
                 .marshal().json(JsonLibrary.Jackson)
-                .to("direct:route-bank");
+                .log(LoggingLevel.INFO, "PUBLICANDO EN transferencias.in TX=${header.transactionId} JMSCorrelationID=${header.JMSCorrelationID}")
+                .to("jms:queue:transferencias.in")
+                .process(new AcceptedResponseProcessor())
+                .marshal().json(JsonLibrary.Jackson);
 
         from("direct:parse")
                 .routeId("parse-tlv")
@@ -102,59 +67,69 @@ public class SipapRouteBuilder extends RouteBuilder {
                 .routeId("validate-transfer")
                 .process(new TransferValidationProcessor());
 
-        // Content-Based Router
-        from("direct:route-bank")
-                .routeId("route-by-bank")
+        // Cola externa de entrada: desacopla la API del procesamiento bancario.
+        from("jms:queue:transferencias.in")
+                .routeId("artemis-transferencias-in")
+                .unmarshal().json(JsonLibrary.Jackson, TransferMessage.class)
+                .process(new RestoreMetadataProcessor())
+                .log(LoggingLevel.INFO, "CONSUMIDA transferencias.in TX=${header.transactionId} banco=${header.bankCode}")
+                .marshal().json(JsonLibrary.Jackson)
                 .choice()
-                    .when(header("bankCode").isEqualTo(QrTestData.ITAU)).to("direct:itau")
-                    .when(header("bankCode").isEqualTo(QrTestData.ATLAS)).to("direct:atlas")
-                    .when(header("bankCode").isEqualTo(QrTestData.FAMILIAR)).to("direct:familiar")
-                    .otherwise().throwException(new TransferValidationException("Banco destino no enrutable"))
+                    .when(header("bankCode").isEqualTo(QrTestData.ITAU)).to("jms:queue:cola.itau")
+                    .when(header("bankCode").isEqualTo(QrTestData.ATLAS)).to("jms:queue:cola.atlas")
+                    .when(header("bankCode").isEqualTo(QrTestData.FAMILIAR)).to("jms:queue:cola.familiar")
+                    .otherwise().log(LoggingLevel.ERROR, "Banco no enrutable después de Artemis TX=${header.transactionId}")
                 .end();
 
-        from("direct:itau")
-                .routeId("consumer-itau")
-                .process(new BankConsumerProcessor("ITAU"))
-                .marshal().json(JsonLibrary.Jackson)
-                .to("direct:resultado");
+        bankConsumer("jms:queue:cola.itau", "consumer-itau", "ITAU");
+        bankConsumer("jms:queue:cola.atlas", "consumer-atlas", "ATLAS");
+        bankConsumer("jms:queue:cola.familiar", "consumer-familiar", "FAMILIAR");
 
-        from("direct:atlas")
-                .routeId("consumer-atlas")
-                .process(new BankConsumerProcessor("ATLAS"))
+        from("direct:bank-processing")
+                .routeId("bank-processing")
+                .process(new DateValidationProcessor())
+                .choice()
+                    .when(header("dateValid").isEqualTo(true))
+                        .process(new CanonicalBodyProcessor())
+                        .marshal().json(JsonLibrary.Jackson)
+                        .setHeader(Exchange.CONTENT_TYPE, constant("application/json"))
+                        .setHeader("X-Transaction-Id", header("transactionId"))
+                        .setHeader("X-Bank", header("bankName"))
+                        .log(LoggingLevel.INFO,
+                                "REQUEST-REPLY banco mock=${header.bankName} TX=${header.transactionId} body=${body}")
+                        .toD(bankMockBaseUrl + "/banks/${header.bankName}/transfer?httpMethod=POST&throwExceptionOnFailure=false")
+                        .process(new BankResponseProcessor())
+                    .otherwise()
+                        .log(LoggingLevel.WARN,
+                                "RECHAZADA POR FECHA TX=${header.transactionId} fecha=${header.transactionDate}")
+                .end()
                 .marshal().json(JsonLibrary.Jackson)
-                .to("direct:resultado");
+                .to("direct:resultado-final");
 
-        from("direct:familiar")
-                .routeId("consumer-familiar")
-                .process(new BankConsumerProcessor("FAMILIAR"))
-                .marshal().json(JsonLibrary.Jackson)
-                .to("direct:resultado");
-
-        from("direct:resultado")
-                .routeId("common-result")
+        from("direct:resultado-final")
+                .routeId("resultado-final")
                 .log(LoggingLevel.INFO,
-                        "\n====================================================\n" +
-                        "FIN CASO ${header.scenarioNumber} - ${header.scenarioName}\n" +
-                        "TX: ${header.transactionId}\n" +
-                        "RESULTADO FINAL -> ${body}\n" +
-                        "====================================================");
+                        "RESULTADO FINAL TX=${header.transactionId} banco=${header.bankName} -> ${body}");
 
-        from("direct:audit")
-                .routeId("audit-wiretap")
+        from("direct:audit-input")
+                .routeId("audit-input")
                 .log(LoggingLevel.INFO,
-                        "AUDITORIA CASO=${header.scenarioNumber} TX=${header.transactionId} QR=${body}");
+                        "AUDITORIA ENTRADA TX=${header.transactionId} fecha=${header.transactionDate} qr=${body}");
     }
 
-    private static void setScenario(org.apache.camel.Exchange exchange,
-                                    int scenarioNumber,
-                                    String scenarioName,
-                                    String qr) {
-        exchange.getMessage().setHeader("scenarioNumber", scenarioNumber);
-        exchange.getMessage().setHeader("scenarioName", scenarioName);
-        exchange.getMessage().setBody(qr);
+    private void bankConsumer(String endpoint, String routeId, String bankName) {
+        from(endpoint)
+                .routeId(routeId)
+                .unmarshal().json(JsonLibrary.Jackson, TransferMessage.class)
+                .process(new RestoreMetadataProcessor())
+                .setHeader("bankName", constant(bankName))
+                .log(LoggingLevel.INFO,
+                        "CONSUMIDOR " + bankName + " TX=${header.transactionId} fecha=${header.transactionDate} JMSCorrelationID=${header.JMSCorrelationID}")
+                .to("direct:bank-processing");
     }
 
-    public static String nextTransactionId() {
-        return "TX%06d".formatted(SEQUENCE.getAndIncrement());
+    private static String env(String name, String defaultValue) {
+        String value = System.getenv(name);
+        return value == null || value.isBlank() ? defaultValue : value;
     }
 }

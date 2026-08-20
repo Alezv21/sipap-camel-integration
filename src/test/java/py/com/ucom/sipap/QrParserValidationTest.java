@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import py.com.ucom.sipap.domain.Transferencia;
 import py.com.ucom.sipap.exception.TransferValidationException;
 import py.com.ucom.sipap.processor.QrParserProcessor;
+import py.com.ucom.sipap.processor.AmountLimitProcessor;
 import py.com.ucom.sipap.processor.TransferValidationProcessor;
 import py.com.ucom.sipap.util.QrTestData;
 
@@ -15,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class QrParserValidationTest {
     private final QrParserProcessor parser = new QrParserProcessor();
     private final TransferValidationProcessor validator = new TransferValidationProcessor();
+    private final AmountLimitProcessor amountLimit = new AmountLimitProcessor();
 
     @Test
     void validItau() throws Exception {
@@ -58,10 +60,20 @@ class QrParserValidationTest {
     }
 
     @Test
-    void rejectAmountGreaterOrEqualTenMillion() throws Exception {
+    void acceptAmountEqualTenMillion() throws Exception {
         Exchange ex = exchange(QrTestData.validDynamic(QrTestData.ITAU, "1234567890", "10000000"));
         parser.process(ex);
-        assertThrows(TransferValidationException.class, () -> validator.process(ex));
+        validator.process(ex);
+        assertDoesNotThrow(() -> amountLimit.process(ex));
+    }
+
+    @Test
+    void rejectAmountGreaterThanTenMillion() throws Exception {
+        Exchange ex = exchange(QrTestData.validDynamic(QrTestData.ITAU, "1234567890", "10000001"));
+        parser.process(ex);
+        validator.process(ex);
+        TransferValidationException exThrown = assertThrows(TransferValidationException.class, () -> amountLimit.process(ex));
+        assertEquals("El monto supera máximo permitido", exThrown.getMessage());
     }
 
     @Test

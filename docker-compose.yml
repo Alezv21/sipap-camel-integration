@@ -1,0 +1,25 @@
+services:
+  artemis:
+    image: apache/activemq-artemis:2.44.0
+    container_name: sipap-artemis
+    environment:
+      ARTEMIS_USER: artemis
+      ARTEMIS_PASSWORD: artemis
+      ANONYMOUS_LOGIN: "false"
+    ports:
+      - "62626:61616"
+      - "8161:8161"
+    volumes:
+      - artemis-data:/var/lib/artemis-instance
+
+  wiremock:
+    image: wiremock/wiremock:3.13.2
+    container_name: sipap-wiremock
+    ports:
+      - "8089:8080"
+    volumes:
+      - ./wiremock:/home/wiremock
+    command: ["--global-response-templating", "--verbose"]
+
+volumes:
+  artemis-data:

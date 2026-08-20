@@ -1,4 +1,3 @@
-@"
 target/
 .idea/
 .vscode/
@@ -7,4 +6,4 @@ target/
 .project
 .settings/
 .DS_Store
-"@ | Out-File -Encoding utf8 .gitignore
+.env

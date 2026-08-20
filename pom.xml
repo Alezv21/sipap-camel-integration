@@ -2,23 +2,38 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>py.com.ucom</groupId>
-    <artifactId>sipap-camel-integration</artifactId>
-    <version>1.0.0</version>
-    <name>SIPAP QR - Apache Camel</name>
-    <description>Simulación educativa de transferencias SIP/QR con Apache Camel y patrones EIP.</description>
+    <artifactId>sipap-camel-integration-v2</artifactId>
+    <version>2.0.0</version>
+
+    <name>SIPAP QR V2 - Camel + Artemis + REST</name>
+    <description>
+        Tarea 2: integración SIP/QR con Apache Camel, Artemis JMS y WireMock.
+    </description>
+
+    <!-- ===================================================== -->
+    <!-- PROPIEDADES                                           -->
+    <!-- ===================================================== -->
 
     <properties>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
         <camel.version>4.18.3</camel.version>
+        <artemis.version>2.44.0</artemis.version>
         <junit.version>5.12.2</junit.version>
     </properties>
 
+    <!-- ===================================================== -->
+    <!-- GESTIÓN DE VERSIONES DE APACHE CAMEL                  -->
+    <!-- ===================================================== -->
+
     <dependencyManagement>
         <dependencies>
+
             <dependency>
                 <groupId>org.apache.camel</groupId>
                 <artifactId>camel-bom</artifactId>
@@ -26,65 +41,126 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+
         </dependencies>
     </dependencyManagement>
 
+    <!-- ===================================================== -->
+    <!-- DEPENDENCIAS                                          -->
+    <!-- ===================================================== -->
+
     <dependencies>
+
+        <!-- Camel Main: ejecución standalone -->
         <dependency>
             <groupId>org.apache.camel</groupId>
             <artifactId>camel-main</artifactId>
         </dependency>
+
+        <!-- Canales internos direct: -->
         <dependency>
             <groupId>org.apache.camel</groupId>
             <artifactId>camel-direct</artifactId>
         </dependency>
+
+        <!-- REST DSL -->
         <dependency>
             <groupId>org.apache.camel</groupId>
-            <artifactId>camel-timer</artifactId>
+            <artifactId>camel-rest</artifactId>
         </dependency>
+
+        <!-- Servidor HTTP utilizado por REST DSL -->
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-undertow</artifactId>
+        </dependency>
+
+        <!-- JSON / Jackson -->
         <dependency>
             <groupId>org.apache.camel</groupId>
             <artifactId>camel-jackson</artifactId>
         </dependency>
+
+        <!-- JMS para comunicación con Artemis -->
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-jms</artifactId>
+        </dependency>
+
+        <!-- Cliente HTTP para invocar los bancos Mock -->
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-http</artifactId>
+        </dependency>
+
+        <!-- Cliente Jakarta JMS de ActiveMQ Artemis -->
+        <dependency>
+            <groupId>org.apache.activemq</groupId>
+            <artifactId>artemis-jakarta-client-all</artifactId>
+            <version>${artemis.version}</version>
+        </dependency>
+
+        <!-- Logging -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
             <version>2.0.17</version>
         </dependency>
 
+        <!-- ================================================= -->
+        <!-- TESTS                                             -->
+        <!-- ================================================= -->
+
         <dependency>
             <groupId>org.apache.camel</groupId>
             <artifactId>camel-test-junit5</artifactId>
             <scope>test</scope>
         </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
+
     </dependencies>
 
+    <!-- ===================================================== -->
+    <!-- BUILD                                                 -->
+    <!-- ===================================================== -->
+
     <build>
+
         <plugins>
+
+            <!-- Compilación Java 17 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.14.0</version>
             </plugin>
+
+            <!-- Ejecución de tests JUnit -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.3</version>
             </plugin>
+
+            <!-- Permite ejecutar: mvn exec:java -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
                 <version>3.5.0</version>
+
                 <configuration>
                     <mainClass>py.com.ucom.sipap.Application</mainClass>
                 </configuration>
             </plugin>
+
         </plugins>
+
     </build>
+
 </project>

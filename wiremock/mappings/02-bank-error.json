@@ -1,0 +1,18 @@
+{
+  "priority": 2,
+  "request": {
+    "method": "POST",
+    "urlPathPattern": "/banks/.+/transfer",
+    "headers": {
+      "X-Transaction-Id": { "matches": ".*FAIL.*" }
+    }
+  },
+  "response": {
+    "status": 500,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "estado": "ERROR",
+      "mensaje": "Error simulado del banco mock"
+    }
+  }
+}
