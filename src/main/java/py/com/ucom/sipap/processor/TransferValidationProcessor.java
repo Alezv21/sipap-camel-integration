@@ -11,7 +11,6 @@ import java.math.BigDecimal;
 import java.util.Map;
 
 public class TransferValidationProcessor implements Processor {
-    private static final BigDecimal MAX_AMOUNT = new BigDecimal("10000000");
     private static final Map<String, String> BANKS = Map.of(
             QrTestData.ITAU, "ITAU",
             QrTestData.ATLAS, "ATLAS",
@@ -48,8 +47,6 @@ public class TransferValidationProcessor implements Processor {
 
         if (t.getTransactionAmount() != null) {
             require(t.getTransactionAmount().compareTo(BigDecimal.ZERO) > 0, "El monto debe ser positivo");
-            require(t.getTransactionAmount().compareTo(MAX_AMOUNT) < 0,
-                    "El monto debe ser menor a 10.000.000");
         }
 
         exchange.getMessage().setHeader("bankCode", mai.getCodigoEntidad());

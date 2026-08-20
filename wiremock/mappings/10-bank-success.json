@@ -1,0 +1,15 @@
+{
+  "priority": 10,
+  "request": {
+    "method": "POST",
+    "urlPathPattern": "/banks/.+/transfer"
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "estado": "PROCESADA",
+      "mensaje": "Transferencia recibida correctamente por el banco mock"
+    }
+  }
+}

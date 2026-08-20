@@ -1,216 +1,457 @@
-# Integración de transferencias SIP/QR con Apache Camel
+# Integración de transferencias SIP/QR V2 con Apache Camel, Artemis y REST
 
-Proyecto educativo para la **Tarea 1: Implementación de flujos de integración utilizando Apache Camel y patrones de mensajería y transformación**.
+Proyecto educativo correspondiente a la **Tarea 2: Desarrollo de una solución de mensajería distribuida utilizando Apache ActiveMQ con patrones de enrutamiento, filtrado y procesamiento de mensajes**.
 
-> **Importante:** este proyecto simula el flujo definido en la consigna. El checksum `A1B2` es ficticio y las cadenas generadas no deben utilizarse para operaciones financieras reales.
+Esta versión parte de la Tarea 1 y conserva el parser TLV, el modelo canónico, las validaciones QR y el enrutamiento por entidad financiera. La evolución incorpora una API REST de entrada, Apache ActiveMQ Artemis mediante JMS, consumidores asíncronos, control de fecha, idempotencia y un banco simulado mediante WireMock.
+
+> **Importante:** el proyecto es educativo. El checksum `A1B2` continúa siendo ficticio y no debe utilizarse para operaciones financieras reales.
 
 ## Objetivo
 
-Simular transferencias SIP mediante QR con estructura TLV simplificada. Apache Camel actúa como mediador: recibe el QR, lo parsea, valida, transforma a un modelo canónico JSON y lo enruta al consumidor del banco destino.
+El flujo recibe una transferencia por HTTP `POST`, interpreta el QR, ejecuta las validaciones heredadas, controla el monto antes de publicar, evita duplicados por `id_transaccion`, publica la transferencia en Artemis y la enruta hacia una cola específica del banco. Cada consumidor valida la fecha y, si corresponde, realiza una llamada REST Request-Reply al banco mock.
 
 ## Tecnologías
 
-- Java 17W
+- Java 17
 - Apache Camel 4.18.3
+- Apache ActiveMQ Artemis 2.44.0
+- JMS Jakarta
 - Maven
 - Jackson JSON
+- WireMock 3.13.2
+- Docker Compose
 - JUnit 5
-- Sin ActiveMQ, Artemis ni ningún otro broker
 
 ## Arquitectura
 
 ```mermaid
 flowchart LR
-    A[Productor Banco A] --> M[direct:sipap-in]
-    B[Productor Banco B] --> M
-    M --> P[direct:parse / Parser TLV]
-    P --> V[direct:validate / Validación]
-    V --> R{Código banco destino}
-    R -->|0015| I[direct:itau]
-    R -->|0007| AT[direct:atlas]
-    R -->|0020| F[direct:familiar]
-    I --> RI[Consumidor ITAU]
-    AT --> RA[Consumidor ATLAS]
-    F --> RF[Consumidor FAMILIAR]
-    RI --> O[direct:resultado]
-    RA --> O
-    RF --> O
-    V -. error .-> E[Resultado RECHAZADA]
-    E --> O
-    M -. wireTap .-> AU[direct:audit]
+    REST[POST /transferencias] --> API[Pipeline Apache Camel]
+    API --> PARSE[Parser TLV]
+    PARSE --> VALID[Validaciones QR]
+    VALID --> AMOUNT{Monto <= 10.000.000?}
+    AMOUNT -->|No| REJ[Respuesta REST RECHAZADA]
+    AMOUNT -->|Sí| IDEM[Control idempotencia]
+    IDEM --> QIN[(Artemis transferencias.in)]
+    QIN --> ROUTER{Código banco}
+    ROUTER --> ITQ[(cola.itau)]
+    ROUTER --> ATQ[(cola.atlas)]
+    ROUTER --> FAQ[(cola.familiar)]
+    ITQ --> IT[Consumidor ITAU]
+    ATQ --> AT[Consumidor ATLAS]
+    FAQ --> FA[Consumidor FAMILIAR]
+    IT --> DATE1{Fecha actual?}
+    AT --> DATE2{Fecha actual?}
+    FA --> DATE3{Fecha actual?}
+    DATE1 -->|Sí| MOCK[REST banco mock]
+    DATE2 -->|Sí| MOCK
+    DATE3 -->|Sí| MOCK
+    DATE1 -->|No| RDATE[RECHAZADA_FECHA]
+    DATE2 -->|No| RDATE
+    DATE3 -->|No| RDATE
+    MOCK --> RESULT[PROCESADA / ERROR_BANCO]
+```
+
+También se incluye el diagrama provisto para la Tarea 2 en:
+
+```text
+/diagrama/flujo-tarea2.png
 ```
 
 ## Flujo
 
-1. Dos rutas `timer:` simulan productores.
-2. Ambos envían cadenas TLV a `direct:sipap-in`.
-3. `direct:parse` interpreta TLV y Merchant Account Information anidado.
-4. `direct:validate` aplica reglas de negocio y estructura.
-5. El objeto `Transferencia` se serializa a JSON (Message Translator).
-6. `direct:route-bank` selecciona ITAU, ATLAS o FAMILIAR (Content-Based Router).
-7. El consumidor recibe **solo el modelo canónico JSON**, no vuelve a interpretar TLV.
-8. Todos los casos terminan en `direct:resultado` con un JSON común.
-9. Parsing o validación fallidos producen estado `RECHAZADA` y no llegan a consumidores bancarios.
+1. El cliente realiza `POST /transferencias` con `id_transaccion`, `fecha_transaccion`, `qr` y opcionalmente `monto`.
+2. Apache Camel conserva los metadatos y procesa la cadena QR sin modificarla.
+3. `QrParserProcessor` convierte TLV al modelo canónico `Transferencia`.
+4. Para un QR estático, el campo `monto` de la petición puede completar el monto del modelo canónico.
+5. Se ejecutan las validaciones heredadas de la Tarea 1.
+6. Se controla que el monto sea menor o igual a `10.000.000`.
+7. Se verifica que el `id_transaccion` no haya sido recibido antes.
+8. La transferencia aceptada se publica como JSON en `transferencias.in`.
+9. Un consumidor de entrada lee `transferencias.in` y enruta el mensaje por código de banco.
+10. La transferencia se publica en `cola.itau`, `cola.atlas` o `cola.familiar`.
+11. El consumidor bancario valida `fecha_transaccion` usando la zona horaria `America/Asuncion`.
+12. Si la fecha es válida, se envía el modelo canónico al banco WireMock mediante REST.
+13. La respuesta del mock se procesa y se registra un resultado final asociado al mismo `id_transaccion`.
 
-## Modelo canónico de ejemplo
+## API REST de entrada
+
+### URL
+
+```text
+POST http://localhost:8080/transferencias
+```
+
+### Headers
+
+```http
+Content-Type: application/json
+```
+
+### Petición
 
 ```json
 {
-  "payload_format_indicator": "01",
-  "point_of_initiation_method": "12",
-  "merchant_account_information": {
-    "globally_unique_identifier": "py.gov.bcp.sip",
-    "codigo_entidad": "0015",
-    "numero_cuenta": "1234567890"
-  },
-  "merchant_category_code": "5731",
-  "transaction_currency": "600",
-  "transaction_amount": 15000,
-  "country_code": "PY",
-  "merchant_name": "JUAN PEREZ",
-  "merchant_city": "ASUNCION",
-  "crc": "A1B2"
+  "id_transaccion": "TX000001",
+  "fecha_transaccion": "2026-08-20",
+  "qr": "00020101021232400014py.gov.bcp.sip01040015021012345678905204573153036005405150005802PY5910JUAN PEREZ6008ASUNCION6304A1B2",
+  "monto": 15000
 }
 ```
 
-## Bancos simulados
+`monto` es opcional. Se utiliza principalmente para completar un **QR estático** que no contiene el tag `54`.
 
-| Código | Banco | Canal Camel |
-|---|---|---|
-| `0015` | ITAU | `direct:itau` |
-| `0007` | ATLAS | `direct:atlas` |
-| `0020` | FAMILIAR | `direct:familiar` |
+### Transferencia aceptada
 
-## Validaciones implementadas
+HTTP `202`:
 
-- Payload Format Indicator = `01`.
-- Point of Initiation Method = `11` o `12`.
-- Merchant Account Information presente.
-- GUID = `py.gov.bcp.sip`.
-- Código de banco reconocido.
-- Número de cuenta presente.
-- MCC presente.
-- Moneda = `600` (PYG).
-- Country Code = `PY`.
-- Merchant Name y Merchant City presentes.
-- QR dinámico (`12`) exige monto.
-- Monto, si existe, debe ser positivo.
-- Monto debe ser menor a `10.000.000`.
-- CRC dummy = `A1B2`.
-- Longitudes TLV coherentes.
+```json
+{
+  "id_transaccion": "TX000001",
+  "estado": "ACEPTADA_PARA_PROCESAMIENTO",
+  "mensaje": "Transferencia enviada a la cola"
+}
+```
+
+La respuesta indica que el mensaje fue publicado para procesamiento asíncrono. No significa que el banco ya lo haya procesado.
+
+### Rechazo por monto
+
+Si el monto es mayor a `10.000.000`, el mensaje **no se publica en Artemis**.
+
+```json
+{
+  "id_transaccion": "TX000002",
+  "estado": "RECHAZADA",
+  "mensaje": "El monto supera máximo permitido"
+}
+```
+
+### Mensaje duplicado
+
+HTTP `409`:
+
+```json
+{
+  "id_transaccion": "TX-DUP-001",
+  "estado": "DUPLICADA",
+  "mensaje": "La transacción ya fue recibida anteriormente"
+}
+```
+
+## Modelo publicado en Artemis
+
+La cola recibe JSON y no objetos JMS serializados. El mensaje contiene el modelo canónico junto con los metadatos necesarios para el consumidor:
+
+```json
+{
+  "id_transaccion": "TX000001",
+  "fecha_transaccion": "2026-08-20",
+  "transferencia": {
+    "payload_format_indicator": "01",
+    "point_of_initiation_method": "12",
+    "merchant_account_information": {
+      "globally_unique_identifier": "py.gov.bcp.sip",
+      "codigo_entidad": "0015",
+      "numero_cuenta": "1234567890"
+    },
+    "merchant_category_code": "5731",
+    "transaction_currency": "600",
+    "transaction_amount": 15000,
+    "country_code": "PY",
+    "merchant_name": "JUAN PEREZ",
+    "merchant_city": "ASUNCION",
+    "crc": "A1B2"
+  }
+}
+```
+
+## Colas Artemis
+
+| Cola | Responsabilidad |
+|---|---|
+| `transferencias.in` | Cola principal para transferencias aceptadas por la API |
+| `cola.itau` | Transferencias destinadas a ITAU (`0015`) |
+| `cola.atlas` | Transferencias destinadas a ATLAS (`0007`) |
+| `cola.familiar` | Transferencias destinadas a FAMILIAR (`0020`) |
+
+La aplicación utiliza JMS únicamente en las rutas de integración. El parser, las reglas y el modelo canónico permanecen desacoplados del broker.
+
+## Banco mock
+
+WireMock se ejecuta en:
+
+```text
+http://localhost:8089
+```
+
+Apache Camel invoca:
+
+```text
+POST http://localhost:8089/banks/{BANCO}/transfer
+```
+
+Ejemplos:
+
+```text
+/banks/ITAU/transfer
+/banks/ATLAS/transfer
+/banks/FAMILIAR/transfer
+```
+
+El cuerpo de la petición es **solo el modelo canónico**. La correlación se envía mediante:
+
+```http
+X-Transaction-Id: TX000001
+X-Bank: ITAU
+```
+
+Los stubs están en `wiremock/mappings/`.
+
+- IDs normales → HTTP `200`.
+- IDs que contienen `REJECT` o `ERROR` → HTTP `422`.
+- IDs que contienen `FAIL` → HTTP `500`.
+
+## Validación de fecha
+
+El consumidor compara `fecha_transaccion` con la fecha actual utilizando:
+
+```text
+America/Asuncion
+```
+
+Si no coincide, no se invoca WireMock y el resultado es:
+
+```json
+{
+  "id_transaccion": "TX000004",
+  "estado": "RECHAZADA_FECHA",
+  "mensaje": "La fecha_transaccion no coincide con la fecha actual ..."
+}
+```
+
+## Idempotencia
+
+`IdempotencyProcessor` utiliza un conjunto concurrente en memoria y toma `id_transaccion` como clave.
+
+Esto implementa **Idempotent Receiver** para la práctica:
+
+- primer `id_transaccion` → aceptado;
+- segundo envío del mismo ID → `DUPLICADA`;
+- el duplicado no se publica nuevamente en Artemis.
+
+### Limitación
+
+El almacenamiento es local en memoria. Se pierde cuando la aplicación se reinicia y no es compartido entre múltiples instancias. Para producción sería necesario un repositorio persistente/distribuido.
+
+## Correlation Identifier
+
+`id_transaccion` se conserva en:
+
+- petición REST;
+- JSON publicado en Artemis;
+- header `JMSCorrelationID`;
+- logs del consumidor;
+- header REST `X-Transaction-Id` enviado al banco mock;
+- resultado final.
+
+Esto permite seguir una misma operación durante todo el flujo distribuido.
 
 ## Patrones EIP aplicados
 
 ### 1. Message Channel
-Los componentes se comunican por canales internos `direct:` como `direct:sipap-in`, `direct:parse`, `direct:validate`, `direct:itau`, `direct:atlas`, `direct:familiar` y `direct:resultado`.
 
-### 2. Pipes and Filters
-El proceso se divide en etapas independientes: recepción → parseo → validación → traducción → enrutamiento → procesamiento.
+Se utilizan dos tipos de canales:
 
-### 3. Message Translator
-`QrParserProcessor` convierte la representación TLV a `Transferencia`, y Jackson la convierte en JSON canónico antes de ingresar al banco.
+**Internos:** rutas `direct:` utilizadas para separar parsing, validación, auditoría y procesamiento.
 
-### 4. Content-Based Router
-La ruta `direct:route-bank` usa `choice()` y el código de entidad del QR para seleccionar el consumidor.
+**Externos:** colas JMS de Artemis (`transferencias.in`, `cola.itau`, `cola.atlas`, `cola.familiar`) que desacoplan productores y consumidores.
 
-### 5. Message Filter
-Los mensajes inválidos quedan fuera del flujo bancario mediante validaciones y `onException(...).handled(true)`.
+### 2. Idempotent Receiver
 
-### 6. Correlation Identifier
-El header `transactionId` (`TX000001`, etc.) acompaña al mensaje durante todo el flujo.
+`IdempotencyProcessor` rechaza un segundo mensaje con el mismo `id_transaccion` antes de publicarlo en Artemis.
 
-### 7. Wire Tap
-`wireTap("direct:audit")` registra una copia del QR de entrada sin cambiar el flujo principal.
+### 3. Correlation Identifier
 
-### 8. Dead Letter / manejo de errores
-Para la práctica se centralizan los errores de parsing y validación con `onException`. El mensaje se transforma en un resultado común `RECHAZADA`, conservando el identificador y el motivo.
+`id_transaccion` acompaña a la transferencia desde la API hasta el resultado final y también se utiliza como `JMSCorrelationID` y `X-Transaction-Id`.
 
-## Estructura del proyecto
+### 4. Request-Reply
+
+Cada consumidor aprobado realiza un `POST` al banco WireMock y espera su respuesta HTTP. La respuesta se analiza y se asocia con la transferencia original.
+
+### Patrones heredados
+
+También permanecen conceptos utilizados en la Tarea 1, entre ellos Pipes and Filters, Message Translator, Content-Based Router y Wire Tap.
+
+## Manejo del monto
+
+La regla de la Tarea 2 es:
 
 ```text
-src/main/java/py/com/ucom/sipap/
-├── Application.java
-├── domain/
-│   ├── MerchantAccountInformation.java
-│   ├── ResultadoTransferencia.java
-│   └── Transferencia.java
-├── exception/
-│   ├── TlvParseException.java
-│   └── TransferValidationException.java
-├── processor/
-│   ├── BankConsumerProcessor.java
-│   ├── QrParserProcessor.java
-│   ├── RejectionProcessor.java
-│   └── TransferValidationProcessor.java
-├── route/
-│   └── SipapRouteBuilder.java
-└── util/
-    ├── QrTestData.java
-    └── TlvUtils.java
+monto <= 10.000.000 -> permitido
+monto >  10.000.000 -> rechazado
+```
+
+El mensaje de rechazo es exactamente:
+
+```text
+El monto supera máximo permitido
+```
+
+La evaluación se realiza antes de publicar en Artemis.
+
+## Estructura principal
+
+```text
+sipap-camel-integration-v2/
+├── pom.xml
+├── docker-compose.yml
+├── README.md
+├── .env.example
+├── scripts/
+│   └── demo.ps1
+├── diagrama/
+│   └── flujo-tarea2.png
+├── wiremock/
+│   ├── mappings/
+│   │   ├── 01-bank-rejected.json
+│   │   ├── 02-bank-error.json
+│   │   └── 10-bank-success.json
+│   └── __files/
+└── src/
+    ├── main/java/py/com/ucom/sipap/
+    │   ├── Application.java
+    │   ├── domain/
+    │   ├── exception/
+    │   ├── processor/
+    │   ├── route/
+    │   └── util/
+    └── test/java/py/com/ucom/sipap/
 ```
 
 ## Cómo ejecutar
 
-Requisitos: JDK 17+ y Maven 3.9+.
+### 1. Requisitos
 
-```bash
+- JDK 17+
+- Maven 3.9+
+- Docker Desktop con Docker Compose
+
+Comprobar:
+
+```powershell
+java -version
+mvn -version
+docker --version
+docker compose version
+```
+
+### 2. Levantar Artemis y WireMock
+
+Desde la raíz:
+
+```powershell
+docker compose up -d
+```
+
+Verificar:
+
+```powershell
+docker compose ps
+```
+
+Consola web de Artemis:
+
+```text
+http://localhost:8161
+```
+
+Credenciales de desarrollo:
+
+```text
+Usuario: artemis
+Contraseña: artemis
+```
+
+WireMock:
+
+```text
+http://localhost:8089/__admin/mappings
+```
+
+### 3. Ejecutar tests
+
+```powershell
 mvn clean test
+```
+
+### 4. Ejecutar Apache Camel
+
+```powershell
 mvn exec:java
 ```
 
-Al ejecutar, los dos productores `timer:` generan automáticamente los **7 escenarios obligatorios** en orden. En consola se verá un bloque `INICIO CASO` y un bloque `FIN CASO` para cada prueba, incluyendo QR, identificador de transacción y resultado final.
+La API queda disponible en:
 
-Los productores usan `repeatCount` solo para que la demostración sea finita y ordenada; siguen siendo endpoints `timer:` y los mensajes ingresan por el mismo canal interno `direct:sipap-in`. Después del séptimo caso la aplicación queda levantada; se puede detener con `Ctrl+C`.
-
-## Ejemplo de resultado procesado
-
-```json
-{
-  "id_transaccion": "TX000001",
-  "estado": "PROCESADA",
-  "mensaje": "Transferencia procesada exitosamente por ITAU"
-}
+```text
+http://localhost:8080/transferencias
 ```
 
-## Ejemplo de resultado rechazado
+### 5. Ejecutar demostración automática
 
-```json
-{
-  "id_transaccion": "TX000001",
-  "estado": "RECHAZADA",
-  "mensaje": "Checksum inválido; se esperaba A1B2"
-}
+En otra terminal PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\demo.ps1
 ```
 
-## Escenarios de demostración automática
+El script envía los escenarios requeridos y usa automáticamente la fecha actual del equipo.
 
-Al ejecutar `mvn exec:java`, la consola muestra automáticamente y en este orden:
+## Pruebas mínimas cubiertas
 
-1. ITAU válido → `PROCESADA`.
-2. ATLAS válido → `PROCESADA`.
-3. FAMILIAR válido → `PROCESADA`.
-4. Banco destino desconocido → `RECHAZADA`.
-5. Longitud TLV incorrecta → `RECHAZADA`.
-6. Monto mayor o igual a `10.000.000` → `RECHAZADA`.
-7. Checksum distinto de `A1B2` → `RECHAZADA`.
+| # | Escenario | Resultado esperado |
+|---|---|---|
+| 1 | REST válida con monto `<= 10.000.000` | Publicada en Artemis |
+| 2 | Monto `> 10.000.000` | `RECHAZADA` antes del broker |
+| 3 | Fecha igual a la actual | Consumidor continúa al mock |
+| 4 | Fecha anterior | `RECHAZADA_FECHA`, sin invocar mock |
+| 5 | Banco mock responde exitosamente | `PROCESADA` |
+| 6 | Banco mock responde rechazo/error | `ERROR_BANCO` |
+| 7 | Mismo `id_transaccion` dos veces | Segundo envío `DUPLICADA` |
+| 8 | Correlación | Mismo ID en API, JMS, logs, mock y resultado |
+| 9 | QR inválido o banco desconocido | `RECHAZADA`, no se encola |
 
-Además, los tests unitarios cubren estos casos y un QR estático válido sin monto.
+## Ejemplo manual en PowerShell
 
-Ejecutar:
+Usar la fecha actual:
 
-```bash
-mvn test
+```powershell
+$today = Get-Date -Format "yyyy-MM-dd"
 ```
 
-## Clases principales
+Luego:
 
-- `TlvUtils`: construye y parsea TLV respetando las longitudes declaradas.
-- `QrParserProcessor`: interpreta los tags principales y los sub-tags de Merchant Account Information.
-- `TransferValidationProcessor`: aplica las reglas de la consigna.
-- `SipapRouteBuilder`: define productores, mediación, canales, enrutamiento, manejo de errores y consumidores.
-- `BankConsumerProcessor`: simula el procesamiento de un banco sobre el modelo canónico JSON.
-- `RejectionProcessor`: genera un resultado uniforme para mensajes rechazados.
+```powershell
+$body = @{
+    id_transaccion = "TX-MANUAL-001"
+    fecha_transaccion = $today
+    qr = "00020101021232400014py.gov.bcp.sip01040015021012345678905204573153036005405150005802PY5910JUAN PEREZ6008ASUNCION6304A1B2"
+} | ConvertTo-Json
 
-## Nota de ejecución
+Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://localhost:8080/transferencias" `
+    -ContentType "application/json" `
+    -Body $body
+```
 
-El proyecto fue preparado con estructura Maven estándar. Si el entorno donde se abre no tiene Maven instalado, se debe instalar/configurar Maven antes de ejecutar los comandos anteriores.
+## Variables de entorno
+
+| Variable | Default |
+|---|---|
+| `ARTEMIS_URL` | `tcp://localhost:61616` |
+| `ARTEMIS_USER` | `artemis` |
+| `ARTEMIS_PASSWORD` | `artemis` |
+| `BANK_MOCK_BASE_URL` | `http://localhost:8089` |
+
+Se incluye `.env.example` como referencia.
